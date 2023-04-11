@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use crate::ops::CustomOp;
 use crate::ops::{module::CustomConst, Op};
 use crate::resource::ResourceSet;
-use crate::types::{ClassicType, CustomType, Signature, SimpleType, TypeRow};
+use crate::types::{ClassicType, CustomType, EdgeKind, Signature, SimpleType, TypeRow};
 use crate::Resource;
 
 pub const fn resource_id() -> SmolStr {
@@ -105,6 +105,14 @@ impl Op for AngleAdd {
 
     fn signature_desc(&self) -> Option<crate::types::SignatureDescription> {
         None
+    }
+
+    fn other_inputs(&self) -> Option<crate::types::EdgeKind> {
+        Some(EdgeKind::StateOrder)
+    }
+
+    fn other_outputs(&self) -> Option<crate::types::EdgeKind> {
+        Some(EdgeKind::StateOrder)
     }
 }
 

@@ -10,7 +10,7 @@ use super::Op;
 use crate::hugr::Hugr;
 use crate::macros::impl_box_clone;
 use crate::resource::ResourceSet;
-use crate::types::SimpleType;
+use crate::types::{EdgeKind, SimpleType};
 use crate::types::{Signature, SignatureDescription};
 
 /// A wrapped custom operation with fast equality checks.
@@ -43,6 +43,14 @@ impl Op for OpaqueOp {
 
     fn signature_desc(&self) -> Option<SignatureDescription> {
         self.custom_op.signature_desc()
+    }
+
+    fn other_inputs(&self) -> Option<EdgeKind> {
+        Some(EdgeKind::StateOrder)
+    }
+
+    fn other_outputs(&self) -> Option<EdgeKind> {
+        Some(EdgeKind::StateOrder)
     }
 }
 
@@ -198,6 +206,14 @@ impl Op for OpDef {
                 })
                 .clone(),
         )
+    }
+
+    fn other_inputs(&self) -> Option<EdgeKind> {
+        Some(EdgeKind::StateOrder)
+    }
+
+    fn other_outputs(&self) -> Option<EdgeKind> {
+        Some(EdgeKind::StateOrder)
     }
 }
 

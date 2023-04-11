@@ -4,7 +4,7 @@ pub mod function;
 pub mod leaf;
 pub mod module;
 
-use crate::types::{ClassicType, EdgeKind, Signature, SignatureDescription};
+use crate::types::{EdgeKind, Signature, SignatureDescription};
 
 pub use controlflow::ControlFlowOp;
 pub use custom::{CustomOp, OpDef, OpaqueOp};
@@ -25,6 +25,13 @@ pub trait Op {
     ///
     /// TODO: Return a reference? It'll need some lazy_statics to make it work.
     fn signature(&self) -> Signature;
+
+    /// If None, there will be no other input edges.
+    /// Otherwise, all other input edges will be of that kind.
+    fn other_inputs(&self) -> Option<EdgeKind>;
+    /// Same for output edges
+    fn other_outputs(&self) -> Option<EdgeKind>;
+
     /// Optional description of the ports in the signature.
     ///
     /// TODO: Implement where possible
@@ -49,33 +56,6 @@ pub enum OpType {
     Leaf(LeafOp),
 }
 
-impl OpType {
-    /// If None, there will be no other input edges.
-    /// Otherwise, all other input edges will be of that kind.
-    pub fn other_inputs(&self) -> Option<EdgeKind> {
-        match self {
-            OpType::Module(_) => None,
-            OpType::ControlFlow(ControlFlowOp::BasicBlock { .. }) => Some(EdgeKind::ControlFlow),
-            _ => Some(EdgeKind::StateOrder),
-        }
-    }
-
-    /// Like "other_inputs" but describes any other output edges
-    pub fn other_outputs(&self) -> Option<EdgeKind> {
-        match self {
-            OpType::Module(op) => match op {
-                ModuleOp::Root | ModuleOp::Struct { .. } | ModuleOp::Alias { .. } => None,
-                ModuleOp::Def { signature } | ModuleOp::Declare { signature } => Some(
-                    EdgeKind::Const(ClassicType::graph_from_sig(signature.clone())),
-                ),
-                ModuleOp::Const(v) => Some(EdgeKind::Const(v.const_type())),
-            },
-            // All others are the same as inputs: ControlFlow or StateOrder
-            _ => self.other_inputs(),
-        }
-    }
-}
-
 impl Op for OpType {
     fn name(&self) -> SmolStr {
         match self {
@@ -92,6 +72,24 @@ impl Op for OpType {
             OpType::ControlFlow(op) => op.signature(),
             OpType::Function(op) => op.signature(),
             OpType::Leaf(op) => op.signature(),
+        }
+    }
+
+    fn other_inputs(&self) -> Option<EdgeKind> {
+        match self {
+            OpType::Module(op) => op.other_inputs(),
+            OpType::ControlFlow(op) => op.other_inputs(),
+            OpType::Function(op) => op.other_inputs(),
+            OpType::Leaf(op) => op.other_inputs(),
+        }
+    }
+
+    fn other_outputs(&self) -> Option<EdgeKind> {
+        match self {
+            OpType::Module(op) => op.other_outputs(),
+            OpType::ControlFlow(op) => op.other_outputs(),
+            OpType::Function(op) => op.other_outputs(),
+            OpType::Leaf(op) => op.other_outputs(),
         }
     }
 }

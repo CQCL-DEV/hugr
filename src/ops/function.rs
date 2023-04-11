@@ -1,7 +1,7 @@
 use smol_str::SmolStr;
 
 use super::Op;
-use crate::types::{ClassicType, Signature, SimpleType, TypeRow};
+use crate::types::{ClassicType, EdgeKind, Signature, SimpleType, TypeRow};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FunctionOp {
@@ -74,5 +74,13 @@ impl Op for FunctionOp {
             }
             FunctionOp::Nested { signature } => signature.clone(),
         }
+    }
+
+    fn other_inputs(&self) -> Option<crate::types::EdgeKind> {
+        Some(EdgeKind::StateOrder)
+    }
+
+    fn other_outputs(&self) -> Option<crate::types::EdgeKind> {
+        Some(EdgeKind::StateOrder)
     }
 }

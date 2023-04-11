@@ -1,6 +1,6 @@
 use smol_str::SmolStr;
 
-use crate::types::{Signature, TypeRow};
+use crate::types::{EdgeKind, Signature, TypeRow};
 
 use super::Op;
 
@@ -38,5 +38,18 @@ impl Op for ControlFlowOp {
                 Signature::new_df(inputs.clone(), outputs.clone())
             }
         }
+    }
+
+    fn other_inputs(&self) -> Option<EdgeKind> {
+        Some(if let ControlFlowOp::BasicBlock { .. } = self {
+            EdgeKind::ControlFlow
+        } else {
+            EdgeKind::StateOrder
+        })
+    }
+
+    fn other_outputs(&self) -> Option<EdgeKind> {
+        // Always the same
+        self.other_inputs()
     }
 }

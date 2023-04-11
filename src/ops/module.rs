@@ -3,7 +3,7 @@ use std::any::Any;
 use super::Op;
 use crate::{
     macros::impl_box_clone,
-    types::{ClassicType, Signature, SimpleType},
+    types::{ClassicType, EdgeKind, Signature, SimpleType},
 };
 
 use downcast_rs::{impl_downcast, Downcast};
@@ -55,6 +55,20 @@ impl Op for ModuleOp {
             ModuleOp::Struct { .. } => todo!(),
             ModuleOp::Alias { .. } => todo!(),
             ModuleOp::Const(v) => v.signature(),
+        }
+    }
+
+    fn other_inputs(&self) -> Option<EdgeKind> {
+        None
+    }
+
+    fn other_outputs(&self) -> Option<EdgeKind> {
+        match self {
+            ModuleOp::Root | ModuleOp::Struct { .. } | ModuleOp::Alias { .. } => None,
+            ModuleOp::Def { signature } | ModuleOp::Declare { signature } => Some(EdgeKind::Const(
+                ClassicType::graph_from_sig(signature.clone()),
+            )),
+            ModuleOp::Const(v) => v.other_outputs(),
         }
     }
 }
@@ -114,6 +128,14 @@ impl Op for ConstValue {
 
     fn signature(&self) -> Signature {
         Signature::default()
+    }
+
+    fn other_inputs(&self) -> Option<EdgeKind> {
+        None
+    }
+
+    fn other_outputs(&self) -> Option<EdgeKind> {
+        Some(EdgeKind::Const(self.const_type()))
     }
 }
 

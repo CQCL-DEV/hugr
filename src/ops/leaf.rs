@@ -7,7 +7,7 @@ use smol_str::SmolStr;
 use super::{Op, OpaqueOp};
 use crate::{
     type_row,
-    types::{ClassicType, QuantumType, Signature, SimpleType},
+    types::{ClassicType, EdgeKind, QuantumType, Signature, SimpleType},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -118,5 +118,13 @@ impl Op for LeafOp {
             LeafOp::Xor => "Xor",
         }
         .into()
+    }
+
+    fn other_inputs(&self) -> Option<EdgeKind> {
+        Some(EdgeKind::StateOrder)
+    }
+
+    fn other_outputs(&self) -> Option<EdgeKind> {
+        Some(EdgeKind::StateOrder)
     }
 }
