@@ -48,7 +48,7 @@ impl Display for SimpleType {
 }
 
 /// Trait of primitive types (SimpleType or ClassicType).
-pub trait PrimType {
+pub trait PrimType: std::fmt::Debug + Clone + 'static {
     // may be updated with functions in future for necessary shared functionality
     // across ClassicType and SimpleType
     // currently used to constrain Container<T>
@@ -68,9 +68,9 @@ pub enum Container<T: PrimType> {
     /// Hash map from hashable key type to value T.
     Map(Box<(ClassicType, T)>),
     /// Product type, known-size tuple over elements of type row.
-    Tuple(Box<TypeRow>),
+    Tuple(Box<TypeRow<T>>),
     /// Product type, variants are tagged by their position in the type row.
-    Sum(Box<TypeRow>),
+    Sum(Box<TypeRow<T>>),
     /// Known size array of T.
     Array(Box<T>, usize),
     /// Alias defined in AliasDefn or AliasDecl nodes.
@@ -155,9 +155,14 @@ impl ClassicType {
         Self::int::<1>()
     }
 
+    /// New unit type, defined as an empty Tuple.
+    pub fn new_unit() -> Self {
+        Self::Container(Container::Tuple(Box::new(TypeRow::new())))
+    }
+
     /// New Sum of Tuple types, used as predicates in branching.
     /// Tuple rows are defined in order by input rows.
-    pub fn new_predicate(variant_rows: impl IntoIterator<Item = TypeRow>) -> Self {
+    pub fn new_predicate(variant_rows: impl IntoIterator<Item = TypeRow<ClassicType>>) -> Self {
         Self::Container(Container::Sum(Box::new(TypeRow::predicate_variants_row(
             variant_rows,
         ))))
@@ -216,9 +221,10 @@ impl SimpleType {
     }
 
     /// New Sum type, variants defined by TypeRow.
-    pub fn new_sum(row: impl Into<TypeRow>) -> Self {
+    pub fn new_sum(row: impl Into<TypeRow<SimpleType>>) -> Self {
         let row = row.into();
         if row.purely_classical() {
+            let row: TypeRow<ClassicType> = row.try_convert_elems().unwrap();
             Container::<ClassicType>::Sum(Box::new(row)).into()
         } else {
             Container::<SimpleType>::Sum(Box::new(row)).into()
@@ -226,25 +232,19 @@ impl SimpleType {
     }
 
     /// New Tuple type, elements defined by TypeRow.
-    pub fn new_tuple(row: impl Into<TypeRow>) -> Self {
+    pub fn new_tuple(row: impl Into<TypeRow<SimpleType>>) -> Self {
         let row = row.into();
         if row.purely_classical() {
+            let row: TypeRow<ClassicType> = row.try_convert_elems().unwrap();
             Container::<ClassicType>::Tuple(Box::new(row)).into()
         } else {
             Container::<SimpleType>::Tuple(Box::new(row)).into()
         }
     }
 
-    /// New unit type, defined as an empty Tuple.
-    pub fn new_unit() -> Self {
-        Self::Classic(ClassicType::Container(Container::Tuple(Box::new(
-            TypeRow::new(),
-        ))))
-    }
-
     /// New Sum of Tuple types, used as predicates in branching.
     /// Tuple rows are defined in order by input rows.
-    pub fn new_predicate(variant_rows: impl IntoIterator<Item = TypeRow>) -> Self {
+    pub fn new_predicate(variant_rows: impl IntoIterator<Item = TypeRow<ClassicType>>) -> Self {
         Self::Classic(ClassicType::new_predicate(variant_rows))
     }
 
@@ -287,12 +287,12 @@ impl<'a> TryFrom<&'a SimpleType> for &'a ClassicType {
 #[cfg_attr(feature = "pyo3", pyclass)]
 #[non_exhaustive]
 #[serde(transparent)]
-pub struct TypeRow {
+pub struct TypeRow<T: PrimType> {
     /// The datatypes in the row.
-    types: Cow<'static, [SimpleType]>,
+    types: Cow<'static, [T]>,
 }
 
-impl Display for TypeRow {
+impl<T: Display + PrimType> Display for TypeRow<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_char('[')?;
         display_list(self.types.as_ref(), f)?;
@@ -301,7 +301,7 @@ impl Display for TypeRow {
 }
 
 #[cfg_attr(feature = "pyo3", pymethods)]
-impl TypeRow {
+impl<T: PrimType> TypeRow<T> {
     /// Returns the number of types in the row.
     #[inline(always)]
     pub fn len(&self) -> usize {
@@ -313,11 +313,13 @@ impl TypeRow {
     pub fn is_empty(&self) -> bool {
         self.types.len() == 0
     }
+}
 
+impl TypeRow<SimpleType> {
     /// Returns whether the row contains only linear data.
     #[inline(always)]
     pub fn purely_linear(&self) -> bool {
-        self.types.iter().all(|typ| typ.is_linear())
+        self.types.iter().all(SimpleType::is_linear)
     }
 
     /// Returns whether the row contains only classic data.
@@ -326,7 +328,23 @@ impl TypeRow {
         self.types.iter().all(SimpleType::is_classical)
     }
 }
-impl TypeRow {
+
+impl TypeRow<ClassicType> {
+    #[inline]
+    /// Return the type row of variants required to define a Sum of Tuples type
+    /// given the rows of each tuple
+    pub fn predicate_variants_row(
+        variant_rows: impl IntoIterator<Item = TypeRow<ClassicType>>,
+    ) -> Self {
+        variant_rows
+            .into_iter()
+            .map(|row| ClassicType::Container(Container::Tuple(Box::new(row))))
+            .collect_vec()
+            .into()
+    }
+}
+
+impl<T: PrimType> TypeRow<T> {
     /// Create a new empty row.
     pub const fn new() -> Self {
         Self {
@@ -335,65 +353,78 @@ impl TypeRow {
     }
 
     /// Iterator over the types in the row.
-    pub fn iter(&self) -> impl Iterator<Item = &SimpleType> {
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.types.iter()
     }
 
     /// Mutable iterator over the types in the row.
-    pub fn to_mut(&mut self) -> &mut Vec<SimpleType> {
+    pub fn to_mut(&mut self) -> &mut Vec<T> {
         self.types.to_mut()
+    }
+
+    /// Allow access (consumption) of the contained elements
+    pub fn into_owned(self) -> Vec<T> {
+        self.types.into_owned()
     }
 
     #[inline(always)]
     /// Returns the port type given an offset. Returns `None` if the offset is out of bounds.
-    pub fn get(&self, offset: usize) -> Option<&SimpleType> {
+    pub fn get(&self, offset: usize) -> Option<&T> {
         self.types.get(offset)
     }
 
     #[inline(always)]
     /// Returns the port type given an offset. Returns `None` if the offset is out of bounds.
-    pub fn get_mut(&mut self, offset: usize) -> Option<&mut SimpleType> {
+    pub fn get_mut(&mut self, offset: usize) -> Option<&mut T> {
         self.types.to_mut().get_mut(offset)
     }
 
-    #[inline]
-    /// Return the type row of variants required to define a Sum of Tuples type
-    /// given the rows of each tuple
-    pub fn predicate_variants_row(variant_rows: impl IntoIterator<Item = TypeRow>) -> Self {
-        variant_rows
+    fn try_convert_elems<D: PrimType + TryFrom<T>>(self) -> Result<TypeRow<D>, D::Error> {
+        let elems: Vec<D> = self
+            .into_owned()
             .into_iter()
-            .map(|row| SimpleType::Classic(ClassicType::Container(Container::Tuple(Box::new(row)))))
-            .collect_vec()
-            .into()
+            .map(D::try_from)
+            .collect::<Result<_, _>>()?;
+        Ok(TypeRow::from(elems))
+    }
+
+    /// Converts the elements of this TypeRow into some other type that they can `.into()`
+    pub fn map_into<T2: PrimType + From<T>>(self) -> TypeRow<T2> {
+        TypeRow::from(
+            self.into_owned()
+                .into_iter()
+                .map(T2::from)
+                .collect::<Vec<T2>>(),
+        )
     }
 }
 
-impl Default for TypeRow {
+impl<T: PrimType> Default for TypeRow<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> From<T> for TypeRow
+impl<F, T: PrimType> From<F> for TypeRow<T>
 where
-    T: Into<Cow<'static, [SimpleType]>>,
+    F: Into<Cow<'static, [T]>>,
 {
-    fn from(types: T) -> Self {
+    fn from(types: F) -> Self {
         Self {
             types: types.into(),
         }
     }
 }
 
-impl Deref for TypeRow {
-    type Target = [SimpleType];
+impl<T: PrimType> Deref for TypeRow<T> {
+    type Target = [T];
 
     fn deref(&self) -> &Self::Target {
         &self.types
     }
 }
 
-impl DerefMut for TypeRow {
+impl<T: PrimType> DerefMut for TypeRow<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.types.to_mut()
     }

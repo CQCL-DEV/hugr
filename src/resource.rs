@@ -12,11 +12,11 @@ use smol_str::SmolStr;
 use thiserror::Error;
 
 use crate::types::type_param::{check_type_arg, TypeArgError};
-use crate::types::TypeRow;
 use crate::types::{
     type_param::{TypeArg, TypeParam},
     Signature, SignatureDescription,
 };
+use crate::types::{SimpleType, TypeRow};
 use crate::Hugr;
 
 /// Trait for resources to provide custom binary code for computing signature.
@@ -29,7 +29,7 @@ pub trait CustomSignatureFunc: Send + Sync {
         name: &SmolStr,
         arg_values: &[TypeArg],
         misc: &HashMap<String, serde_yaml::Value>,
-    ) -> Result<(TypeRow, TypeRow, ResourceSet), SignatureError>;
+    ) -> Result<(TypeRow<SimpleType>, TypeRow<SimpleType>, ResourceSet), SignatureError>;
 
     /// Describe the signature of a node, given the operation name,
     /// values for the type parameters,

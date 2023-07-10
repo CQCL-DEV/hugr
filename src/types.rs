@@ -19,6 +19,8 @@ use crate::hugr::{Direction, Port};
 use crate::utils::display_list;
 use crate::{resource::ResourceSet, type_row};
 
+use self::simple::PrimType;
+
 /// The kinds of edges in a HUGR, excluding Hierarchy.
 //#[cfg_attr(feature = "pyo3", pyclass)] # TODO: Manually derive pyclass with non-unit variants
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -50,11 +52,11 @@ impl EdgeKind {
 #[derive(Clone, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Signature {
     /// Value inputs of the function.
-    pub input: TypeRow,
+    pub input: TypeRow<SimpleType>,
     /// Value outputs of the function.
-    pub output: TypeRow,
+    pub output: TypeRow<SimpleType>,
     /// Possible static input (for call / load-constant).
-    pub static_input: TypeRow,
+    pub static_input: TypeRow<ClassicType>,
     /// The resource requirements of all the inputs
     pub input_resources: ResourceSet,
     /// The resource requirements of all the outputs
@@ -102,12 +104,11 @@ impl Signature {
     /// Returns the type of a [`Port`]. Returns `None` if the port is out of bounds.
     pub fn get(&self, port: Port) -> Option<EdgeKind> {
         if port.direction() == Direction::Incoming && port.index() >= self.input.len() {
-            self.static_input
-                .get(port.index() - self.input.len())?
-                .clone()
-                .try_into()
-                .ok()
-                .map(EdgeKind::Static)
+            Some(EdgeKind::Static(
+                self.static_input
+                    .get(port.index() - self.input.len())?
+                    .clone(),
+            ))
         } else {
             self.get_df(port).cloned().map(EdgeKind::Value)
         }
@@ -233,9 +234,9 @@ impl Signature {
 impl Signature {
     /// Create a new signature.
     pub fn new(
-        input: impl Into<TypeRow>,
-        output: impl Into<TypeRow>,
-        static_input: impl Into<TypeRow>,
+        input: impl Into<TypeRow<SimpleType>>,
+        output: impl Into<TypeRow<SimpleType>>,
+        static_input: impl Into<TypeRow<ClassicType>>,
     ) -> Self {
         Self {
             input: input.into(),
@@ -247,13 +248,16 @@ impl Signature {
     }
 
     /// Create a new signature with the same input and output types.
-    pub fn new_linear(linear: impl Into<TypeRow>) -> Self {
+    pub fn new_linear(linear: impl Into<TypeRow<SimpleType>>) -> Self {
         let linear = linear.into();
         Signature::new_df(linear.clone(), linear)
     }
 
     /// Create a new signature with only dataflow inputs and outputs.
-    pub fn new_df(input: impl Into<TypeRow>, output: impl Into<TypeRow>) -> Self {
+    pub fn new_df(
+        input: impl Into<TypeRow<SimpleType>>,
+        output: impl Into<TypeRow<SimpleType>>,
+    ) -> Self {
         Signature::new(input, output, type_row![])
     }
 }
@@ -326,10 +330,10 @@ impl SignatureDescription {
         }
     }
 
-    fn row_zip<'a>(
-        type_row: &'a TypeRow,
+    fn row_zip<'a, T: PrimType>(
+        type_row: &'a TypeRow<T>,
         name_row: &'a [SmolStr],
-    ) -> impl Iterator<Item = (&'a SmolStr, &'a SimpleType)> {
+    ) -> impl Iterator<Item = (&'a SmolStr, &'a T)> {
         name_row
             .iter()
             .chain(&EmptyStringIterator)
@@ -362,7 +366,7 @@ impl SignatureDescription {
     pub fn static_input_zip<'a>(
         &'a self,
         signature: &'a Signature,
-    ) -> impl Iterator<Item = (&SmolStr, &SimpleType)> {
+    ) -> impl Iterator<Item = (&SmolStr, &ClassicType)> {
         Self::row_zip(&signature.static_input, &self.static_input)
     }
 }

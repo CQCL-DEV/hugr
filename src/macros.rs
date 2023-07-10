@@ -45,11 +45,11 @@ pub(crate) use impl_box_clone;
 /// # use hugr::macros::type_row;
 /// # use hugr::types::{ClassicType, SimpleType, Signature, TypeRow};
 /// const B: SimpleType = SimpleType::Classic(ClassicType::bit());
-/// let static_row: TypeRow = type_row![B, B];
-/// let dynamic_row: TypeRow = vec![B, B, B].into();
+/// let static_row: TypeRow<SimpleType> = type_row![B, B];
+/// let dynamic_row: TypeRow<SimpleType> = vec![B, B, B].into();
 /// let sig: Signature = Signature::new_df(static_row.clone(), dynamic_row);
 ///
-/// let repeated_row: TypeRow = type_row![B; 2];
+/// let repeated_row: TypeRow<SimpleType> = type_row![B; 2];
 /// assert_eq!(repeated_row, static_row);
 /// ```
 #[allow(unused_macros)]
@@ -64,7 +64,7 @@ macro_rules! type_row {
         {
             use $crate::types;
             static ROW: &[types::SimpleType] = &[$($t),*];
-            let row: types::TypeRow = ROW.into();
+            let row: types::TypeRow<_> = ROW.into();
             row
         }
     };
@@ -72,10 +72,43 @@ macro_rules! type_row {
         {
             use $crate::types;
             static ROW: &[types::SimpleType] = &[$t; $n];
-            let row: types::TypeRow = ROW.into();
+            let row: types::TypeRow<_> = ROW.into();
             row
         }
     };
 }
+
+/// Like [type_row!] but for rows of [ClassicType]s
+///
+/// [ClassicType]: types::ClassicType
+#[allow(unused_macros)]
+#[macro_export]
+macro_rules! classic_row {
+    () => {
+        {
+            $crate::types::TypeRow::new()
+        }
+    };
+    ($($t:expr),+ $(,)?) => {
+        {
+            use $crate::types;
+            static ROW: &[types::ClassicType] = &[$($t),*];
+            let row: types::TypeRow<_> = ROW.into();
+            row
+        }
+    };
+    ($t:expr; $n:expr) => {
+        {
+            use $crate::types;
+            static ROW: &[types::ClassicType] = &[$t; $n];
+            let row: types::TypeRow<_> = ROW.into();
+            row
+        }
+    };
+}
+
 #[allow(unused_imports)]
 pub use type_row;
+
+#[allow(unused_imports)]
+pub use classic_row;

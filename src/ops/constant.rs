@@ -59,7 +59,9 @@ pub enum ConstValue {
     /// A constant specifying a variant of a Sum type.
     Sum {
         tag: usize,
-        variants: TypeRow,
+        // We require the type to be entirely Classic (i.e. we don't allow
+        // a classic variant of a Sum with other variants that are linear)
+        variants: TypeRow<ClassicType>,
         val: Box<ConstValue>,
     },
     /// A tuple of constant values.
@@ -120,10 +122,7 @@ impl ConstValue {
                 ClassicType::Container(Container::Sum(Box::new(variants.clone())))
             }
             Self::Tuple(vals) => {
-                let row: Vec<_> = vals
-                    .iter()
-                    .map(|val| SimpleType::Classic(val.const_type()))
-                    .collect();
+                let row: Vec<_> = vals.iter().map(|val| val.const_type()).collect();
                 ClassicType::Container(Container::Tuple(Box::new(row.into())))
             }
             Self::F64(_) => ClassicType::F64,
@@ -173,9 +172,12 @@ impl ConstValue {
     }
 
     /// Constant Sum over Tuples, used as predicates.
-    pub fn predicate(tag: usize, variant_rows: impl IntoIterator<Item = TypeRow>) -> Self {
+    pub fn predicate(
+        tag: usize,
+        variant_rows: impl IntoIterator<Item = TypeRow<ClassicType>>,
+    ) -> Self {
         let variants = TypeRow::predicate_variants_row(variant_rows);
-        assert!(variants.get(tag) == Some(&SimpleType::new_unit()));
+        assert!(variants.get(tag) == Some(&ClassicType::new_unit()));
         ConstValue::Sum {
             tag,
             variants,
@@ -184,7 +186,7 @@ impl ConstValue {
     }
 
     /// Constant Sum over Tuples with just one variant
-    pub fn unary_predicate(row: impl Into<TypeRow>) -> Self {
+    pub fn unary_predicate(row: impl Into<TypeRow<ClassicType>>) -> Self {
         Self::predicate(0, [row.into()])
     }
 

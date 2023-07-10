@@ -7,7 +7,11 @@ use super::{
     BasicBlockID, BuildError, CfgID, Container, Dataflow, HugrBuilder, Wire,
 };
 
-use crate::{hugr::view::HugrView, type_row, types::SimpleType};
+use crate::{
+    hugr::view::HugrView,
+    type_row,
+    types::{ClassicType, SimpleType},
+};
 
 use crate::ops::handle::NodeHandle;
 use crate::ops::{self, BasicBlock, OpType};
@@ -22,7 +26,7 @@ use crate::{hugr::HugrMut, types::TypeRow, Hugr};
 pub struct CFGBuilder<T> {
     pub(super) base: T,
     pub(super) cfg_node: Node,
-    pub(super) inputs: Option<TypeRow>,
+    pub(super) inputs: Option<TypeRow<SimpleType>>,
     pub(super) exit_node: Node,
     pub(super) n_out_wires: usize,
 }
@@ -54,7 +58,10 @@ impl<H: AsMut<Hugr> + AsRef<Hugr>> SubContainer for CFGBuilder<H> {
 
 impl CFGBuilder<Hugr> {
     /// New CFG rooted HUGR builder
-    pub fn new(input: impl Into<TypeRow>, output: impl Into<TypeRow>) -> Result<Self, BuildError> {
+    pub fn new(
+        input: impl Into<TypeRow<SimpleType>>,
+        output: impl Into<TypeRow<SimpleType>>,
+    ) -> Result<Self, BuildError> {
         let input = input.into();
         let output = output.into();
         let cfg_op = ops::CFG {
@@ -79,8 +86,8 @@ impl<B: AsMut<Hugr> + AsRef<Hugr>> CFGBuilder<B> {
     pub(super) fn create(
         mut base: B,
         cfg_node: Node,
-        input: TypeRow,
-        output: TypeRow,
+        input: TypeRow<SimpleType>,
+        output: TypeRow<SimpleType>,
     ) -> Result<Self, BuildError> {
         let n_out_wires = output.len();
         let exit_block_type = OpType::BasicBlock(BasicBlock::Exit {
@@ -122,18 +129,18 @@ impl<B: AsMut<Hugr> + AsRef<Hugr>> CFGBuilder<B> {
     /// This function will return an error if there is an error adding the node.
     pub fn block_builder(
         &mut self,
-        inputs: TypeRow,
-        predicate_variants: Vec<TypeRow>,
-        other_outputs: TypeRow,
+        inputs: TypeRow<SimpleType>,
+        predicate_variants: Vec<TypeRow<ClassicType>>,
+        other_outputs: TypeRow<SimpleType>,
     ) -> Result<BlockBuilder<&mut Hugr>, BuildError> {
         self.any_block_builder(inputs, predicate_variants, other_outputs, false)
     }
 
     fn any_block_builder(
         &mut self,
-        inputs: TypeRow,
-        predicate_variants: Vec<TypeRow>,
-        other_outputs: TypeRow,
+        inputs: TypeRow<SimpleType>,
+        predicate_variants: Vec<TypeRow<ClassicType>>,
+        other_outputs: TypeRow<SimpleType>,
         entry: bool,
     ) -> Result<BlockBuilder<&mut Hugr>, BuildError> {
         let op = OpType::BasicBlock(BasicBlock::DFB {
@@ -166,8 +173,8 @@ impl<B: AsMut<Hugr> + AsRef<Hugr>> CFGBuilder<B> {
     /// This function will return an error if there is an error adding the node.
     pub fn simple_block_builder(
         &mut self,
-        inputs: TypeRow,
-        outputs: TypeRow,
+        inputs: TypeRow<SimpleType>,
+        outputs: TypeRow<SimpleType>,
         n_cases: usize,
     ) -> Result<BlockBuilder<&mut Hugr>, BuildError> {
         self.block_builder(inputs, vec![type_row![]; n_cases], outputs)
@@ -182,8 +189,8 @@ impl<B: AsMut<Hugr> + AsRef<Hugr>> CFGBuilder<B> {
     /// This function will return an error if an entry block has already been built.
     pub fn entry_builder(
         &mut self,
-        predicate_variants: Vec<TypeRow>,
-        other_outputs: TypeRow,
+        predicate_variants: Vec<TypeRow<ClassicType>>,
+        other_outputs: TypeRow<SimpleType>,
     ) -> Result<BlockBuilder<&mut Hugr>, BuildError> {
         let inputs = self
             .inputs
@@ -200,7 +207,7 @@ impl<B: AsMut<Hugr> + AsRef<Hugr>> CFGBuilder<B> {
     /// This function will return an error if there is an error adding the node.
     pub fn simple_entry_builder(
         &mut self,
-        outputs: TypeRow,
+        outputs: TypeRow<SimpleType>,
         n_cases: usize,
     ) -> Result<BlockBuilder<&mut Hugr>, BuildError> {
         self.entry_builder(vec![type_row![]; n_cases], outputs)
@@ -244,9 +251,9 @@ impl<B: AsMut<Hugr> + AsRef<Hugr>> BlockBuilder<B> {
     fn create(
         base: B,
         block_n: Node,
-        predicate_variants: Vec<TypeRow>,
-        other_outputs: TypeRow,
-        inputs: TypeRow,
+        predicate_variants: Vec<TypeRow<ClassicType>>,
+        other_outputs: TypeRow<SimpleType>,
+        inputs: TypeRow<SimpleType>,
     ) -> Result<Self, BuildError> {
         // The node outputs a predicate before the data outputs of the block node
         let predicate_type = SimpleType::new_predicate(predicate_variants);
@@ -275,9 +282,9 @@ impl<B: AsMut<Hugr> + AsRef<Hugr>> BlockBuilder<B> {
 impl BlockBuilder<Hugr> {
     /// Initialize a [`BasicBlock::DFB`] rooted HUGR builder
     pub fn new(
-        inputs: impl Into<TypeRow>,
-        predicate_variants: impl IntoIterator<Item = TypeRow>,
-        other_outputs: impl Into<TypeRow>,
+        inputs: impl Into<TypeRow<SimpleType>>,
+        predicate_variants: impl IntoIterator<Item = TypeRow<ClassicType>>,
+        other_outputs: impl Into<TypeRow<SimpleType>>,
     ) -> Result<Self, BuildError> {
         let inputs = inputs.into();
         let predicate_variants: Vec<_> = predicate_variants.into_iter().collect();
@@ -298,11 +305,11 @@ impl BlockBuilder<Hugr> {
 mod test {
     use std::collections::HashSet;
 
-    use cool_asserts::assert_matches;
-
     use crate::builder::build_traits::HugrBuilder;
     use crate::builder::{DataflowSubContainer, ModuleBuilder};
+    use crate::macros::classic_row;
     use crate::{builder::test::NAT, ops::ConstValue, type_row, types::Signature};
+    use cool_asserts::assert_matches;
 
     use super::*;
     #[test]
@@ -372,7 +379,10 @@ mod test {
     fn build_basic_cfg<T: AsMut<Hugr> + AsRef<Hugr>>(
         cfg_builder: &mut CFGBuilder<T>,
     ) -> Result<(), BuildError> {
-        let sum2_variants = vec![type_row![NAT], type_row![NAT]];
+        let sum2_variants = vec![
+            classic_row![ClassicType::i64()],
+            classic_row![ClassicType::i64()],
+        ];
         let mut entry_b = cfg_builder.entry_builder(sum2_variants.clone(), type_row![])?;
         let entry = {
             let [inw] = entry_b.input_wires_arr();
