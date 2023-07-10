@@ -1,10 +1,16 @@
 use std::hash::Hash;
 
-use super::nest_cfgs::CfgView;
+use itertools::Itertools;
+
+use super::nest_cfgs::{CfgView, SimpleCfgView};
+use crate::builder::{BuildError, CFGBuilder, Dataflow, SubContainer};
 use crate::hugr::view::HugrView;
+use crate::hugr::HugrMut;
+use crate::ops::handle::NodeHandle;
 use crate::ops::tag::OpTag;
-use crate::ops::OpTrait;
-use crate::{Direction, Node};
+use crate::ops::{BasicBlock, Const, ConstValue, LoadConstant, OpTrait, OpType, Output};
+use crate::types::{ClassicType, SimpleType, TypeRow};
+use crate::{type_row, Direction, Hugr, Node, Port};
 
 /// We provide a view of a cfg where every node has at most one of
 /// (multiple predecessors, multiple successors).
@@ -22,15 +28,15 @@ enum HalfNode {
     X(Node),
 }
 
-struct HalfNodeView<'a, H> {
-    h: &'a H,
+struct HalfNodeView<'a> {
+    h: &'a mut Hugr,
     entry: Node,
     exit: Node,
 }
 
-impl<'a, H: HugrView> HalfNodeView<'a, H> {
+impl<'a> HalfNodeView<'a> {
     #[allow(unused)]
-    pub(crate) fn new(h: &'a H) -> Self {
+    pub(crate) fn new(h: &'a mut Hugr) -> Self {
         let mut children = h.children(h.root());
         let entry = children.next().unwrap(); // Panic if malformed
         let exit = children.next().unwrap();
@@ -59,7 +65,7 @@ impl<'a, H: HugrView> HalfNodeView<'a, H> {
     }
 }
 
-impl<H: HugrView> CfgView<HalfNode> for HalfNodeView<'_, H> {
+impl CfgView<HalfNode> for HalfNodeView<'_> {
     type Iterator<'c> = <Vec<HalfNode> as IntoIterator>::IntoIter where Self: 'c;
     fn entry_node(&self) -> HalfNode {
         HalfNode::N(self.entry)
@@ -87,8 +93,112 @@ impl<H: HugrView> CfgView<HalfNode> for HalfNodeView<'_, H> {
         };
         succs.into_iter()
     }
+
+    fn nest_sese_region(
+        &mut self,
+        entry_edge: (HalfNode, HalfNode),
+        exit_edge: (HalfNode, HalfNode),
+    ) -> Result<HalfNode, String> {
+        let entry_edge = maybe_split(self.h, entry_edge).unwrap();
+        let exit_edge = maybe_split(self.h, exit_edge).unwrap();
+        let new_block = SimpleCfgView::new(self.h).nest_sese_region(entry_edge, exit_edge)?;
+        assert_eq!(self.h.output_neighbours(new_block).count(), 1);
+        Ok(HalfNode::N(new_block))
+    }
 }
 
+fn maybe_split(
+    h: &mut crate::Hugr,
+    edge: (HalfNode, HalfNode),
+) -> Result<(Node, Node), BuildError> {
+    match edge.1 {
+        HalfNode::X(n) => {
+            // The only edge to an X should be from the same N
+            assert_eq!(HalfNode::N(n), edge.0);
+            // And the underlying node cannot be the exit node of the CFG (as that has
+            // no successors, so would not have an X part - a better HalfNode might)
+            let crate::ops::OpType::BasicBlock(BasicBlock::DFB {inputs, other_outputs, predicate_variants, ..}) = h.get_optype(n)
+            else{ panic!("Not a basic block node"); };
+            let inputs = inputs.clone();
+            let other_outputs = other_outputs.clone();
+            let predicate_variants = predicate_variants.clone();
+            // Split node!
+            // TODO in the future, use replace API
+
+            let pred_ty = ClassicType::new_predicate(predicate_variants.iter().cloned());
+            let midputs = prepend(SimpleType::Classic(pred_ty.clone()), &other_outputs);
+            let parent = h.get_parent(n).unwrap();
+            let mut cfg_builder = CFGBuilder::from_existing(&mut *h, parent)?;
+            let new_block = {
+                let block_builder = cfg_builder.block_builder(
+                    midputs.clone(),
+                    predicate_variants,
+                    other_outputs,
+                )?;
+                let mut wires = block_builder.input_wires();
+                block_builder.finish_with_outputs(wires.next().unwrap(), wires)?
+            };
+            cfg_builder.finish_sub_container()?;
+            for (i, p1) in h.node_outputs(n).enumerate() {
+                let (tgt_n, tgt_i) = h.linked_ports(n, p1).exactly_one().unwrap();
+                h.disconnect(n, p1)?;
+                h.connect(new_block.node(), i, tgt_n, tgt_i.index())?;
+            }
+            h.replace_op(
+                n,
+                BasicBlock::DFB {
+                    inputs,
+                    other_outputs: midputs,
+                    predicate_variants: vec![type_row![]],
+                },
+            );
+            // Do we need to remove the old "output ports" (successors) of `n` here?
+            // Now wire up the new predicate input of new_block, shuffling the rest along
+            let cst = h.add_op_with_parent(n, Const(ConstValue::simple_unary_predicate()))?;
+            let lcst = h.add_op_with_parent(
+                n,
+                LoadConstant {
+                    datatype: pred_ty.clone(),
+                },
+            )?;
+            h.add_other_edge(cst, lcst)?;
+            let output = h.children(n).take(2).last().unwrap();
+            let mut xtra = (lcst, Port::new_outgoing(0));
+            for p in h.node_inputs(output) {
+                let (src_n, src_p) =
+                    std::mem::replace(&mut xtra, h.linked_ports(output, p).exactly_one().unwrap());
+                h.disconnect(output, p)?;
+                h.connect(src_n, src_p.index(), output, p.index())?;
+            }
+            let (src_n, src_p) = xtra;
+            h.connect(src_n, src_p.index(), output, h.node_inputs(output).len())?;
+            let OpType::Output(Output {types, resources}) = h.get_optype(output) else {panic!("Expected Output node");};
+            h.replace_op(
+                output,
+                Output {
+                    types: prepend(SimpleType::Classic(pred_ty), types),
+                    resources: resources.clone(),
+                },
+            );
+
+            h.connect(n, 0, new_block.node(), 0)?;
+            Ok((n, new_block.node()))
+        }
+        HalfNode::N(n) => {
+            let src = match edge.0 {
+                HalfNode::N(n) => n,
+                HalfNode::X(n) => n,
+            };
+            Ok((src, n))
+        }
+    }
+}
+
+fn prepend(ty: SimpleType, tys: &TypeRow) -> TypeRow {
+    let mut v = vec![ty];
+    v.extend_from_slice(tys);
+    v.into()
+}
 #[cfg(test)]
 mod test {
     use super::super::nest_cfgs::{test::*, EdgeClassifier};
@@ -99,7 +209,7 @@ mod test {
     use std::collections::HashSet;
     #[test]
     fn test_cond_in_loop_combined_headers() -> Result<(), BuildError> {
-        let (h, main, tail) = build_conditional_in_loop_cfg(false)?;
+        let (mut h, main, tail) = build_conditional_in_loop_cfg(false)?;
         //               /-> left --\
         //  entry -> main            > merge -> tail -> exit
         //            |  \-> right -/             |
@@ -111,7 +221,7 @@ mod test {
         //               |          \-> right -/                 |
         //               \---<---<---<---<---<---<---<---<---<---/
         // Allowing to identity two nested regions (and fixing the problem with a SimpleCfgView on the same example)
-        let v = HalfNodeView::new(&h);
+        let v = HalfNodeView::new(&mut h);
         let edge_classes = EdgeClassifier::get_edge_classes(&v);
         let HalfNodeView { h: _, entry, exit } = v;
 

@@ -43,10 +43,11 @@ use std::hash::Hash;
 
 use itertools::Itertools;
 
+use crate::hugr::rewrite::outline_cfg::OutlineCfg;
 use crate::hugr::view::HugrView;
 use crate::ops::tag::OpTag;
 use crate::ops::OpTrait;
-use crate::{Direction, Node};
+use crate::{Direction, Hugr, Node};
 
 // TODO: transform the CFG: each SESE region can be turned into its own Kappa-node
 // (in a BB with one predecessor and one successor, which may then be merged
@@ -71,6 +72,50 @@ pub trait CfgView<T> {
     fn successors(&self, node: T) -> Self::Iterator<'_>;
     /// Returns an iterator over the predecessors of the specified basic block.
     fn predecessors(&self, node: T) -> Self::Iterator<'_>;
+
+    /// Given an entry edge and exit edge defining a SESE region, mutates the
+    /// Hugr such that all nodes between these edges are placed in a nested CFG.
+    /// Hugr is temporarily passed in until we have a View-like trait that allows applying a rewrite.
+    /// Returns the newly-constructed block (containing a nested CFG), or an error
+    /// if the two edges do not constitute a SESE region.
+    fn nest_sese_region(&mut self, entry_edge: (T, T), exit_edge: (T, T)) -> Result<T, String>;
+}
+
+/// Transforms a CFG to nested form.
+pub fn transform_cfg_to_nested<T: Copy + Eq + Hash>(
+    view: &mut impl CfgView<T>,
+) -> Result<(), String> {
+    let edges = EdgeClassifier::get_edge_classes(view);
+    // Traverse. Any traversal will encounter edges in SESE-respecting order,
+    // but TODO does this stack work for branching/merging?
+    // Might need to traverse dominator tree considering edges from each node, or similar.
+    let mut last_edge_in_class: HashMap<usize, (T, T)> = HashMap::new();
+    let mut seen_nodes = HashSet::new();
+    let mut node_stack = Vec::new();
+    node_stack.push(view.entry_node());
+    while let Some(mut n) = node_stack.pop() {
+        if !seen_nodes.insert(n) {
+            continue;
+        }
+        let succs = view.successors(n).collect_vec();
+        for &s in succs.iter() {
+            let edge = (n, s);
+            if let Some(class) = edges.get(&edge) {
+                if let Some(&prev_edge) = last_edge_in_class.get(class) {
+                    // n will be moved into new block.
+                    // TODO OutlineCfg will only work if all other edges from n are *inside* the block...
+                    // so how does this work? Don't we need to traverse successors of n in a particular order,
+                    // i.e. most-nested-blocks first?
+                    if n != prev_edge.1 || succs.len() > 1 {
+                        n = view.nest_sese_region(prev_edge, edge).unwrap();
+                    }
+                }
+                last_edge_in_class.insert(*class, (n, s));
+            }
+            node_stack.push(s);
+        }
+    }
+    Ok(())
 }
 
 /// Directed edges in a Cfg - i.e. along which control flows from first to second only.
@@ -125,14 +170,14 @@ fn cfg_edge<T: Copy + Clone + PartialEq + Eq + Hash>(s: T, d: EdgeDest<T>) -> Cf
 }
 
 /// A straightforward view of a Cfg as it appears in a Hugr
-pub struct SimpleCfgView<'a, H> {
-    h: &'a H,
+pub struct SimpleCfgView<'a> {
+    h: &'a mut Hugr,
     entry: Node,
     exit: Node,
 }
-impl<'a, H: HugrView> SimpleCfgView<'a, H> {
+impl<'a> SimpleCfgView<'a> {
     /// Creates a SimpleCfgView for the specified CSG of a Hugr
-    pub fn new(h: &'a H) -> Self {
+    pub fn new(h: &'a mut Hugr) -> Self {
         let mut children = h.children(h.root());
         let entry = children.next().unwrap(); // Panic if malformed
         let exit = children.next().unwrap();
@@ -140,7 +185,7 @@ impl<'a, H: HugrView> SimpleCfgView<'a, H> {
         Self { h, entry, exit }
     }
 }
-impl<H: HugrView> CfgView<Node> for SimpleCfgView<'_, H> {
+impl CfgView<Node> for SimpleCfgView<'_> {
     fn entry_node(&self) -> Node {
         self.entry
     }
@@ -149,7 +194,7 @@ impl<H: HugrView> CfgView<Node> for SimpleCfgView<'_, H> {
         self.exit
     }
 
-    type Iterator<'c> = H::Neighbours<'c>
+    type Iterator<'c> = <Hugr as HugrView>::Neighbours<'c>
     where
         Self: 'c;
 
@@ -160,6 +205,73 @@ impl<H: HugrView> CfgView<Node> for SimpleCfgView<'_, H> {
     fn predecessors(&self, node: Node) -> Self::Iterator<'_> {
         self.h.neighbours(node, Direction::Incoming)
     }
+
+    fn nest_sese_region(
+        &mut self,
+        entry_edge: (Node, Node),
+        exit_edge: (Node, Node),
+    ) -> Result<Node, String> {
+        let blocks = get_blocks(self, entry_edge, exit_edge)?;
+        let cfg = self.h.get_parent(entry_edge.0).unwrap();
+        assert!([entry_edge.1, exit_edge.0, exit_edge.1].iter().all(|n| self
+            .h
+            .get_parent(*n)
+            .unwrap()
+            == cfg));
+        // If the above succeeds, we should have a valid set of blocks ensuring the below also succeeds
+        self.h.apply_rewrite(OutlineCfg::new(blocks)).unwrap();
+        // Hmmm, no way to get the node created out from the rewrite...
+        assert!([entry_edge.0, exit_edge.1]
+            .iter()
+            .all(|n| self.h.get_parent(*n).unwrap() == cfg));
+        let new_cfg = self.h.get_parent(exit_edge.0).unwrap();
+        assert_eq!(new_cfg, self.h.get_parent(entry_edge.1).unwrap());
+        let new_block = self.h.get_parent(new_cfg).unwrap();
+        assert_eq!(cfg, self.h.get_parent(new_block).unwrap());
+        Ok(new_block)
+    }
+}
+
+/// Given entry and exit edges for a SESE region, get a list of all the blocks in it.
+pub fn get_blocks<T: Copy + Eq + Hash + std::fmt::Debug>(
+    v: &impl CfgView<T>,
+    entry_edge: (T, T),
+    exit_edge: (T, T),
+) -> Result<HashSet<T>, String> {
+    // Identify the nodes in the region
+    let mut blocks = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(entry_edge.1);
+    while let Some(n) = queue.pop_front() {
+        if blocks.insert(n) {
+            if n == exit_edge.0 {
+                let succs: Vec<T> = v.successors(n).collect();
+                let in_succs: Vec<T> = succs
+                    .iter()
+                    .copied()
+                    .filter(|s| *s != exit_edge.1)
+                    .collect();
+                if succs.len() == in_succs.len() {
+                    return Err("Exit node missing exit edge".to_string());
+                }
+                queue.extend(in_succs.into_iter())
+            } else {
+                queue.extend(v.successors(n));
+            }
+        }
+    }
+    if blocks.contains(&entry_edge.0) {
+        return Err("Entry edge was from a node in the block".to_string());
+    }
+    for p in v.predecessors(entry_edge.1) {
+        if p != entry_edge.0 && !blocks.contains(&p) {
+            return Err(format!(
+                "Entry node had additional external predecessor {:?}",
+                p
+            ));
+        }
+    }
+    Ok(blocks)
 }
 
 /// Records an undirected Depth First Search over a CfgView,
@@ -398,7 +510,6 @@ impl<T: Copy + Clone + PartialEq + Eq + Hash> EdgeClassifier<T> {
 pub(crate) mod test {
     use super::*;
     use crate::builder::{BuildError, CFGBuilder, Container, DataflowSubContainer, HugrBuilder};
-    use crate::hugr::region::FlatRegionView;
     use crate::ops::{
         handle::{BasicBlockID, ConstID, NodeHandle},
         ConstValue,
@@ -440,14 +551,14 @@ pub(crate) mod test {
         let exit = cfg_builder.exit_block();
         cfg_builder.branch(&tail, 0, &exit)?;
 
-        let h = cfg_builder.finish_hugr()?;
+        let mut h = cfg_builder.finish_hugr()?;
 
         let (entry, exit) = (entry.node(), exit.node());
         let (split, merge, head, tail) = (split.node(), merge.node(), head.node(), tail.node());
         // There's no need to use a FlatRegionView here but we do so just to check
-        // that we *can* (as we'll need to for "real" module Hugr's).
-        let v = FlatRegionView::new(&h, h.root());
-        let edge_classes = EdgeClassifier::get_edge_classes(&SimpleCfgView::new(&v));
+        // that we *can* (as we'll need to for "real" module Hugr's). TODO reinstate when we can apply_rewrite on (some kind of) View.
+        // let v = FlatRegionView::new(&h, h.root());
+        let edge_classes = EdgeClassifier::get_edge_classes(&SimpleCfgView::new(&mut h)); //&SimpleCfgView::new(&v));
         let [&left,&right] = edge_classes.keys().filter(|(s,_)| *s == split).map(|(_,t)|t).collect::<Vec<_>>()[..] else {panic!("Split node should have two successors");};
 
         let classes = group_by(edge_classes);
@@ -461,6 +572,26 @@ pub(crate) mod test {
                 sorted([(entry, split), (merge, head), (tail, exit)]), // Two regions, conditional and then loop.
             ])
         );
+        transform_cfg_to_nested(&mut SimpleCfgView::new(&mut h)).unwrap();
+        h.validate().unwrap();
+        assert_eq!(1, depth(&h, entry));
+        assert_eq!(1, depth(&h, exit));
+        for n in [split, left, right, merge, head, tail] {
+            assert_eq!(3, depth(&h, n));
+        }
+        let first = [split, left, right, merge]
+            .iter()
+            .map(|n| h.get_parent(*n).unwrap())
+            .unique()
+            .exactly_one()
+            .unwrap();
+        let second = [head, tail]
+            .iter()
+            .map(|n| h.get_parent(*n).unwrap())
+            .unique()
+            .exactly_one()
+            .unwrap();
+        assert_ne!(first, second);
         Ok(())
     }
 
@@ -471,7 +602,7 @@ pub(crate) mod test {
         //      \-> right -/     \-<--<-/
         // Here we would like two consecutive regions, but there is no *edge* between
         // the conditional and the loop to indicate the boundary, so we cannot separate them.
-        let (h, merge, tail) = build_cond_then_loop_cfg(false)?;
+        let (mut h, merge, tail) = build_cond_then_loop_cfg(false)?;
         let (merge, tail) = (merge.node(), tail.node());
         let [entry, exit]: [Node; 2] = h
             .children(h.root())
@@ -480,7 +611,7 @@ pub(crate) mod test {
             .try_into()
             .unwrap();
 
-        let edge_classes = EdgeClassifier::get_edge_classes(&SimpleCfgView::new(&h));
+        let edge_classes = EdgeClassifier::get_edge_classes(&SimpleCfgView::new(&mut h));
         let [&left,&right] = edge_classes.keys().filter(|(s,_)| *s == entry).map(|(_,t)|t).collect::<Vec<_>>()[..] else {panic!("Entry node should have two successors");};
 
         let classes = group_by(edge_classes);
@@ -499,7 +630,7 @@ pub(crate) mod test {
 
     #[test]
     fn test_cond_in_loop_separate_headers() -> Result<(), BuildError> {
-        let (h, head, tail) = build_conditional_in_loop_cfg(true)?;
+        let (mut h, head, tail) = build_conditional_in_loop_cfg(true)?;
         let head = head.node();
         let tail = tail.node();
         //                        /-> left --\
@@ -511,7 +642,7 @@ pub(crate) mod test {
         // merge is unique predecessor of tail
         let merge = h.input_neighbours(tail).exactly_one().unwrap();
 
-        let v = SimpleCfgView::new(&h);
+        let v = SimpleCfgView::new(&mut h);
         let edge_classes = EdgeClassifier::get_edge_classes(&v);
         let SimpleCfgView { h: _, entry, exit } = v;
         let [&left,&right] = edge_classes.keys().filter(|(s,_)| *s == split).map(|(_,t)|t).collect::<Vec<_>>()[..] else {panic!("Split node should have two successors");};
@@ -526,12 +657,21 @@ pub(crate) mod test {
                 Vec::from([(tail, head)])              // The loop back-edge
             ])
         );
+        transform_cfg_to_nested(&mut SimpleCfgView::new(&mut h)).unwrap();
+        h.validate().unwrap();
+        assert_eq!(1, depth(&h, entry));
+        assert_eq!(3, depth(&h, head));
+        for n in [split, left, right, merge] {
+            assert_eq!(5, depth(&h, n));
+        }
+        assert_eq!(3, depth(&h, tail));
+        assert_eq!(1, depth(&h, exit));
         Ok(())
     }
 
     #[test]
     fn test_cond_in_loop_combined_headers() -> Result<(), BuildError> {
-        let (h, head, tail) = build_conditional_in_loop_cfg(false)?;
+        let (mut h, head, tail) = build_conditional_in_loop_cfg(false)?;
         let head = head.node();
         let tail = tail.node();
         //               /-> left --\
@@ -540,7 +680,7 @@ pub(crate) mod test {
         //             \---<---<---<---<---<--<---/
         // Here we would like an indication that we can make two nested regions,
         // but there is no edge to act as entry to a region containing just the conditional :-(.
-        let v = SimpleCfgView::new(&h);
+        let v = SimpleCfgView::new(&mut h);
         let edge_classes = EdgeClassifier::get_edge_classes(&v);
         let SimpleCfgView { h: _, entry, exit } = v;
         // merge is unique predecessor of tail
@@ -702,5 +842,12 @@ pub(crate) mod test {
 
         let h = cfg_builder.finish_hugr()?;
         Ok((h, head, tail))
+    }
+
+    pub fn depth(h: &impl HugrView, n: Node) -> u32 {
+        match h.get_parent(n) {
+            Some(p) => 1 + depth(h, p),
+            None => 0,
+        }
     }
 }
