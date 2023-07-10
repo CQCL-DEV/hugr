@@ -2,7 +2,6 @@ use super::ClassicType;
 
 use super::Container;
 
-use super::LinearType;
 use super::PrimType;
 
 use smol_str::SmolStr;
@@ -116,24 +115,16 @@ impl From<ClassicType> for SerSimpleType {
     }
 }
 
-impl From<LinearType> for SerSimpleType {
-    fn from(value: LinearType) -> Self {
-        match value {
-            LinearType::Qubit => SerSimpleType::Q,
-            LinearType::Container(c) => c.into(),
-            LinearType::Qpaque(inner) => SerSimpleType::Opaque {
-                custom: inner,
-                l: true,
-            },
-        }
-    }
-}
-
 impl From<SimpleType> for SerSimpleType {
     fn from(value: SimpleType) -> Self {
         match value {
-            SimpleType::Linear(l) => l.into(),
             SimpleType::Classic(c) => c.into(),
+            SimpleType::Qubit => SerSimpleType::Q,
+            SimpleType::Qontainer(c) => c.into(),
+            SimpleType::Qpaque(inner) => SerSimpleType::Opaque {
+                custom: inner,
+                l: true,
+            },
         }
     }
 }
@@ -156,7 +147,7 @@ where
 impl From<SerSimpleType> for SimpleType {
     fn from(value: SerSimpleType) -> Self {
         match value {
-            SerSimpleType::Q => LinearType::Qubit.into(),
+            SerSimpleType::Q => SimpleType::Qubit,
             SerSimpleType::I { width } => ClassicType::Int(width).into(),
             SerSimpleType::F => ClassicType::F64.into(),
             SerSimpleType::S => ClassicType::String.into(),
@@ -167,7 +158,7 @@ impl From<SerSimpleType> for SimpleType {
             SerSimpleType::Tuple {
                 row: inner,
                 l: true,
-            } => Container::<LinearType>::Tuple(box_convert_try(*inner)).into(),
+            } => Container::<SimpleType>::Tuple(box_convert_try(*inner)).into(),
             SerSimpleType::Tuple {
                 row: inner,
                 l: false,
@@ -175,22 +166,20 @@ impl From<SerSimpleType> for SimpleType {
             SerSimpleType::Sum {
                 row: inner,
                 l: true,
-            } => Container::<LinearType>::Sum(box_convert_try(*inner)).into(),
+            } => Container::<SimpleType>::Sum(box_convert_try(*inner)).into(),
             SerSimpleType::Sum {
                 row: inner,
                 l: false,
             } => Container::<ClassicType>::Sum(box_convert_try(*inner)).into(),
             SerSimpleType::List { inner, l: true } => {
-                Container::<LinearType>::List(box_convert_try(*inner)).into()
+                Container::<SimpleType>::List(box_convert_try(*inner)).into()
             }
             SerSimpleType::List { inner, l: false } => {
                 Container::<ClassicType>::List(box_convert_try(*inner)).into()
             }
-            SerSimpleType::Map { k, v, l: true } => Container::<LinearType>::Map(Box::new((
-                (*k).try_into().unwrap(),
-                (*v).try_into().unwrap(),
-            )))
-            .into(),
+            SerSimpleType::Map { k, v, l: true } => {
+                Container::<SimpleType>::Map(Box::new(((*k).try_into().unwrap(), *v))).into()
+            }
             SerSimpleType::Map { k, v, l: false } => Container::<ClassicType>::Map(Box::new((
                 (*k).try_into().unwrap(),
                 (*v).try_into().unwrap(),
@@ -200,15 +189,15 @@ impl From<SerSimpleType> for SimpleType {
                 inner,
                 len,
                 l: true,
-            } => Container::<LinearType>::Array(box_convert_try(*inner), len).into(),
+            } => Container::<SimpleType>::Array(box_convert_try(*inner), len).into(),
             SerSimpleType::Array {
                 inner,
                 len,
                 l: false,
             } => Container::<ClassicType>::Array(box_convert_try(*inner), len).into(),
-            SerSimpleType::Alias { name: s, l: true } => Container::<LinearType>::Alias(s).into(),
+            SerSimpleType::Alias { name: s, l: true } => Container::<SimpleType>::Alias(s).into(),
             SerSimpleType::Alias { name: s, l: false } => Container::<ClassicType>::Alias(s).into(),
-            SerSimpleType::Opaque { custom: c, l: true } => LinearType::Qpaque(c).into(),
+            SerSimpleType::Opaque { custom: c, l: true } => SimpleType::Qpaque(c),
             SerSimpleType::Opaque {
                 custom: c,
                 l: false,

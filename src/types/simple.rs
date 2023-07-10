@@ -15,7 +15,7 @@ use super::{custom::CustomType, Signature};
 use crate::{ops::constant::HugrIntWidthStore, utils::display_list};
 use crate::{resource::ResourceSet, type_row};
 
-/// A type that represents concrete data.
+/// A type that represents concrete data. Can include both linear and classical parts.
 ///
 // TODO: Derive pyclass
 //
@@ -24,10 +24,14 @@ use crate::{resource::ResourceSet, type_row};
 #[serde(from = "serialize::SerSimpleType", into = "serialize::SerSimpleType")]
 #[non_exhaustive]
 pub enum SimpleType {
-    /// A type containing classical data. Elements of this type can be copied.
+    /// A type containing only classical data. Elements of this type can be copied.
     Classic(ClassicType),
-    /// A type containing linear data. Elements of this type must be used exactly once.
-    Linear(LinearType),
+    /// A qubit.
+    Qubit,
+    /// A linear opaque type that can be downcasted by the extensions that define it.
+    Qpaque(CustomType),
+    /// A nested definition containing other linear types (possibly as well as classical ones)
+    Qontainer(Container<SimpleType>),
 }
 
 mod serialize;
@@ -36,18 +40,20 @@ impl Display for SimpleType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             SimpleType::Classic(ty) => ty.fmt(f),
-            SimpleType::Linear(ty) => ty.fmt(f),
+            SimpleType::Qubit => f.write_str("Qubit"),
+            SimpleType::Qpaque(custom) => custom.fmt(f),
+            SimpleType::Qontainer(c) => c.fmt(f),
         }
     }
 }
 
-/// Trait of primitive types (ClassicType or LinearType).
+/// Trait of primitive types (SimpleType or ClassicType).
 pub trait PrimType {
     // may be updated with functions in future for necessary shared functionality
-    // across ClassicType and LinearType
+    // across ClassicType and SimpleType
     // currently used to constrain Container<T>
 
-    /// Is this type linear
+    /// Is this type linear? (I.e. does it have any linear components?)
     const LINEAR: bool;
 }
 
@@ -91,10 +97,10 @@ impl From<Container<ClassicType>> for SimpleType {
     }
 }
 
-impl From<Container<LinearType>> for SimpleType {
+impl From<Container<SimpleType>> for SimpleType {
     #[inline]
-    fn from(value: Container<LinearType>) -> Self {
-        Self::Linear(LinearType::Container(value))
+    fn from(value: Container<SimpleType>) -> Self {
+        Self::Qontainer(value)
     }
 }
 
@@ -194,39 +200,14 @@ impl PrimType for ClassicType {
     const LINEAR: bool = false;
 }
 
-/// A type that represents concrete linear data.
-///
-// TODO: Derive pyclass.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum LinearType {
-    /// A qubit.
-    #[default]
-    Qubit,
-    /// A linear opaque operation that can be downcasted by the extensions that define it.
-    Qpaque(CustomType),
-    /// A nested definition containing other linear types.
-    Container(Container<LinearType>),
-}
-
-impl Display for LinearType {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match self {
-            LinearType::Qubit => f.write_str("Qubit"),
-            LinearType::Qpaque(custom) => custom.fmt(f),
-            LinearType::Container(c) => c.fmt(f),
-        }
-    }
-}
-
-impl PrimType for LinearType {
+impl PrimType for SimpleType {
     const LINEAR: bool = true;
 }
 
 impl SimpleType {
-    /// Returns whether the type contains only linear data.
+    /// Returns whether the type contains linear data (perhaps as well as classical)
     pub fn is_linear(&self) -> bool {
-        matches!(self, Self::Linear(_))
+        !self.is_classical()
     }
 
     /// Returns whether the type contains only classic data.
@@ -240,7 +221,7 @@ impl SimpleType {
         if row.purely_classical() {
             Container::<ClassicType>::Sum(Box::new(row)).into()
         } else {
-            Container::<LinearType>::Sum(Box::new(row)).into()
+            Container::<SimpleType>::Sum(Box::new(row)).into()
         }
     }
 
@@ -250,7 +231,7 @@ impl SimpleType {
         if row.purely_classical() {
             Container::<ClassicType>::Tuple(Box::new(row)).into()
         } else {
-            Container::<LinearType>::Tuple(Box::new(row)).into()
+            Container::<SimpleType>::Tuple(Box::new(row)).into()
         }
     }
 
@@ -273,51 +254,33 @@ impl SimpleType {
     }
 }
 
-impl Default for SimpleType {
-    fn default() -> Self {
-        Self::Linear(Default::default())
+impl From<ClassicType> for SimpleType {
+    fn from(typ: ClassicType) -> Self {
+        SimpleType::Classic(typ)
     }
 }
 
-/// Implementations of Into and TryFrom for SimpleType and &'a SimpleType.
-macro_rules! impl_from_into_simple_type {
-    ($target:ident, $matcher:pat, $unpack:expr, $new:expr) => {
-        impl From<$target> for SimpleType {
-            fn from(typ: $target) -> Self {
-                $new(typ)
-            }
+impl TryFrom<SimpleType> for ClassicType {
+    type Error = &'static str;
+
+    fn try_from(op: SimpleType) -> Result<Self, Self::Error> {
+        match op {
+            SimpleType::Classic(typ) => Ok(typ),
+            _ => Err("Invalid type conversion"),
         }
-
-        impl TryFrom<SimpleType> for $target {
-            type Error = &'static str;
-
-            fn try_from(op: SimpleType) -> Result<Self, Self::Error> {
-                match op {
-                    $matcher => Ok($unpack),
-                    _ => Err("Invalid type conversion"),
-                }
-            }
-        }
-
-        impl<'a> TryFrom<&'a SimpleType> for &'a $target {
-            type Error = &'static str;
-
-            fn try_from(op: &'a SimpleType) -> Result<Self, Self::Error> {
-                match op {
-                    $matcher => Ok($unpack),
-                    _ => Err("Invalid type conversion"),
-                }
-            }
-        }
-    };
+    }
 }
-impl_from_into_simple_type!(
-    ClassicType,
-    SimpleType::Classic(typ),
-    typ,
-    SimpleType::Classic
-);
-impl_from_into_simple_type!(LinearType, SimpleType::Linear(typ), typ, SimpleType::Linear);
+
+impl<'a> TryFrom<&'a SimpleType> for &'a ClassicType {
+    type Error = &'static str;
+
+    fn try_from(op: &'a SimpleType) -> Result<Self, Self::Error> {
+        match op {
+            SimpleType::Classic(typ) => Ok(typ),
+            _ => Err("Invalid type conversion"),
+        }
+    }
+}
 
 /// List of types, used for function signatures.
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -371,17 +334,6 @@ impl TypeRow {
         }
     }
 
-    /// Create a new row from a Cow slice of types.
-    ///
-    /// See [`type_row!`] for a more ergonomic way to create a statically allocated rows.
-    ///
-    /// [`type_row!`]: crate::macros::type_row.
-    pub fn from(types: impl Into<Cow<'static, [SimpleType]>>) -> Self {
-        Self {
-            types: types.into(),
-        }
-    }
-
     /// Iterator over the types in the row.
     pub fn iter(&self) -> impl Iterator<Item = &SimpleType> {
         self.types.iter()
@@ -427,7 +379,9 @@ where
     T: Into<Cow<'static, [SimpleType]>>,
 {
     fn from(types: T) -> Self {
-        Self::from(types.into())
+        Self {
+            types: types.into(),
+        }
     }
 }
 
