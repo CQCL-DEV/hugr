@@ -1389,10 +1389,13 @@ pub fn emit_barray_discard<'c, H: HugrView<Node = Node>>(
     _op: BArrayDiscard,
     array_v: BasicValueEnum<'c>,
 ) -> Result<()> {
-    let array_ptr =
-        ctx.builder()
-            .build_extract_value(array_v.into_struct_value(), 0, "array_ptr")?;
-    ccg.emit_free_array(ctx, array_ptr.into_pointer_value())?;
+    let BArrayFatPtrComponents {
+        elems_ptr,
+        mask_ptr,
+        ..
+    } = decompose_barray_fat_pointer(ctx.builder(), array_v)?;
+    ccg.emit_free_array(ctx, elems_ptr)?;
+    ccg.emit_free_array(ctx, mask_ptr)?;
     Ok(())
 }
 
@@ -1692,6 +1695,10 @@ pub fn emit_from_array_op<'c, H: HugrView<Node = Node>>(
 
 #[cfg(test)]
 mod test {
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+
+    use super::BorrowArrayCodegen;
     use hugr_core::Wire;
     use hugr_core::builder::{DataflowHugr, HugrBuilder};
     use hugr_core::extension::prelude::either_type;
@@ -1705,6 +1712,7 @@ mod test {
         self, BArrayOpBuilder, BArrayRepeat, BArrayScan, BArrayToArray, borrow_array_type,
     };
     use hugr_core::types::Type;
+    use hugr_core::{HugrView, Node};
     use hugr_core::{
         builder::{Dataflow, DataflowSubContainer, SubContainer},
         extension::{
@@ -1725,8 +1733,9 @@ mod test {
     use itertools::Itertools as _;
     use rstest::rstest;
 
-    use crate::emit::test::PanicTestPreludeCodegen;
-    use crate::extension::DefaultPreludeCodegen;
+    use crate::emit::EmitFuncContext;
+    use crate::emit::test::{Emission, PanicTestPreludeCodegen, TEST_EMIT_DEBUG};
+    use crate::extension::{DefaultPreludeCodegen, PreludeCodegen};
     use crate::types::HugrType;
     use crate::{
         check_emission,
@@ -1771,6 +1780,151 @@ mod test {
                 .add_default_borrow_array_extensions(DefaultPreludeCodegen)
         });
         check_emission!(hugr, llvm_ctx);
+    }
+
+    #[derive(Clone)]
+    struct AccountingCodegen;
+
+    impl BorrowArrayCodegen for AccountingCodegen {
+        fn emit_panic<H: HugrView<Node = Node>>(
+            &self,
+            ctx: &mut EmitFuncContext<H>,
+            err: inkwell::values::BasicValueEnum,
+        ) -> anyhow::Result<()> {
+            DefaultPreludeCodegen.emit_panic(ctx, err)
+        }
+
+        fn emit_allocate_array<'c, H: HugrView<Node = Node>>(
+            &self,
+            ctx: &mut EmitFuncContext<'c, '_, H>,
+            size: inkwell::values::IntValue<'c>,
+        ) -> anyhow::Result<inkwell::values::PointerValue<'c>> {
+            let iw_ctx = ctx.typing_session().iw_context();
+            let sig = ctx
+                .llvm_ptr_type()
+                .fn_type(&[iw_ctx.i64_type().into()], false);
+            let alloc = ctx.get_extern_func("test_array_alloc", sig)?;
+            Ok(ctx
+                .builder()
+                .build_call(alloc, &[size.into()], "")?
+                .try_as_basic_value()
+                .unwrap_basic()
+                .into_pointer_value())
+        }
+
+        fn emit_free_array<'c, H: HugrView<Node = Node>>(
+            &self,
+            ctx: &mut EmitFuncContext<'c, '_, H>,
+            ptr: inkwell::values::PointerValue<'c>,
+        ) -> anyhow::Result<()> {
+            let sig = ctx
+                .typing_session()
+                .iw_context()
+                .void_type()
+                .fn_type(&[ctx.llvm_ptr_type().into()], false);
+            let free = ctx.get_extern_func("test_array_free", sig)?;
+            ctx.builder().build_call(free, &[ptr.into()], "")?;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct AllocationAccounting {
+        outstanding: Vec<usize>,
+        allocated: usize,
+        invalid_frees: usize,
+    }
+
+    static ARRAY_ALLOCATIONS: Mutex<AllocationAccounting> = Mutex::new(AllocationAccounting {
+        outstanding: Vec::new(),
+        allocated: 0,
+        invalid_frees: 0,
+    });
+
+    unsafe extern "C" {
+        fn malloc(size: usize) -> *mut c_void;
+        fn free(ptr: *mut c_void);
+    }
+
+    unsafe extern "C" fn test_array_alloc(size: usize) -> *mut c_void {
+        let ptr = unsafe { malloc(size) };
+        let mut accounting = ARRAY_ALLOCATIONS.lock().unwrap();
+        accounting.allocated += 1;
+        accounting.outstanding.push(ptr as usize);
+        ptr
+    }
+
+    unsafe extern "C" fn test_array_free(ptr: *mut c_void) {
+        let mut accounting = ARRAY_ALLOCATIONS.lock().unwrap();
+        if let Some(index) = accounting
+            .outstanding
+            .iter()
+            .position(|&p| p == ptr as usize)
+        {
+            accounting.outstanding.swap_remove(index);
+            unsafe { free(ptr) };
+        } else {
+            accounting.invalid_frees += 1;
+        }
+    }
+
+    #[rstest]
+    fn exec_discard_releases_allocations(mut exec_ctx: TestContext) {
+        use crate::utils::fat::FatExt as _;
+
+        let hugr = SimpleHugrConfig::new()
+            .with_extensions(exec_registry())
+            .finish(|mut builder| {
+                let one = builder.add_load_value(ConstUsize::new(1));
+                let two = builder.add_load_value(ConstUsize::new(2));
+                let array = builder.add_new_borrow_array(usize_t(), [one, two]).unwrap();
+                let (_, array) = builder
+                    .add_borrow_array_get(usize_t(), 2, array, one)
+                    .unwrap();
+                builder
+                    .add_borrow_array_discard(usize_t(), 2, array)
+                    .unwrap();
+                builder.finish_hugr_with_outputs([]).unwrap()
+            });
+        exec_ctx.add_extensions(|cge| {
+            cge.add_default_prelude_extensions()
+                .add_borrow_array_extensions(AccountingCodegen)
+        });
+        let emission = Emission::emit_hugr(
+            hugr.fat_root().unwrap(),
+            exec_ctx.get_emit_hugr(),
+            TEST_EMIT_DEBUG,
+        )
+        .unwrap();
+        emission.verify().unwrap();
+        let module = emission.module();
+        module
+            .get_function("main")
+            .unwrap()
+            .set_linkage(inkwell::module::Linkage::External);
+        let engine = module
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        engine.add_global_mapping(
+            &module.get_function("test_array_alloc").unwrap(),
+            test_array_alloc as *const () as usize,
+        );
+        engine.add_global_mapping(
+            &module.get_function("test_array_free").unwrap(),
+            test_array_free as *const () as usize,
+        );
+        let run: unsafe extern "C" fn() =
+            unsafe { engine.get_function("main").unwrap().into_raw() };
+        for _ in 0..100 {
+            unsafe { run() };
+        }
+        let accounting = ARRAY_ALLOCATIONS.lock().unwrap();
+        assert_eq!(accounting.allocated, 200);
+        assert_eq!(accounting.invalid_frees, 0);
+        assert!(
+            accounting.outstanding.is_empty(),
+            "borrow-array allocations leaked"
+        );
     }
 
     #[rstest]
