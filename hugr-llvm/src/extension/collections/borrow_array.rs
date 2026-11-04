@@ -1698,7 +1698,6 @@ mod test {
     use std::ffi::c_void;
     use std::sync::Mutex;
 
-    use super::BorrowArrayCodegen;
     use hugr_core::Wire;
     use hugr_core::builder::{DataflowHugr, HugrBuilder};
     use hugr_core::extension::prelude::either_type;
@@ -1712,7 +1711,6 @@ mod test {
         self, BArrayOpBuilder, BArrayRepeat, BArrayScan, BArrayToArray, borrow_array_type,
     };
     use hugr_core::types::Type;
-    use hugr_core::{HugrView, Node};
     use hugr_core::{
         builder::{Dataflow, DataflowSubContainer, SubContainer},
         extension::{
@@ -1733,9 +1731,8 @@ mod test {
     use itertools::Itertools as _;
     use rstest::rstest;
 
-    use crate::emit::EmitFuncContext;
     use crate::emit::test::{Emission, PanicTestPreludeCodegen, TEST_EMIT_DEBUG};
-    use crate::extension::{DefaultPreludeCodegen, PreludeCodegen};
+    use crate::extension::DefaultPreludeCodegen;
     use crate::types::HugrType;
     use crate::{
         check_emission,
@@ -1780,52 +1777,6 @@ mod test {
                 .add_default_borrow_array_extensions(DefaultPreludeCodegen)
         });
         check_emission!(hugr, llvm_ctx);
-    }
-
-    #[derive(Clone)]
-    struct AccountingCodegen;
-
-    impl BorrowArrayCodegen for AccountingCodegen {
-        fn emit_panic<H: HugrView<Node = Node>>(
-            &self,
-            ctx: &mut EmitFuncContext<H>,
-            err: inkwell::values::BasicValueEnum,
-        ) -> anyhow::Result<()> {
-            DefaultPreludeCodegen.emit_panic(ctx, err)
-        }
-
-        fn emit_allocate_array<'c, H: HugrView<Node = Node>>(
-            &self,
-            ctx: &mut EmitFuncContext<'c, '_, H>,
-            size: inkwell::values::IntValue<'c>,
-        ) -> anyhow::Result<inkwell::values::PointerValue<'c>> {
-            let iw_ctx = ctx.typing_session().iw_context();
-            let sig = ctx
-                .llvm_ptr_type()
-                .fn_type(&[iw_ctx.i64_type().into()], false);
-            let alloc = ctx.get_extern_func("test_array_alloc", sig)?;
-            Ok(ctx
-                .builder()
-                .build_call(alloc, &[size.into()], "")?
-                .try_as_basic_value()
-                .unwrap_basic()
-                .into_pointer_value())
-        }
-
-        fn emit_free_array<'c, H: HugrView<Node = Node>>(
-            &self,
-            ctx: &mut EmitFuncContext<'c, '_, H>,
-            ptr: inkwell::values::PointerValue<'c>,
-        ) -> anyhow::Result<()> {
-            let sig = ctx
-                .typing_session()
-                .iw_context()
-                .void_type()
-                .fn_type(&[ctx.llvm_ptr_type().into()], false);
-            let free = ctx.get_extern_func("test_array_free", sig)?;
-            ctx.builder().build_call(free, &[ptr.into()], "")?;
-            Ok(())
-        }
     }
 
     #[derive(Default)]
@@ -1888,7 +1839,7 @@ mod test {
             });
         exec_ctx.add_extensions(|cge| {
             cge.add_default_prelude_extensions()
-                .add_borrow_array_extensions(AccountingCodegen)
+                .add_default_borrow_array_extensions(DefaultPreludeCodegen)
         });
         let emission = Emission::emit_hugr(
             hugr.fat_root().unwrap(),
@@ -1906,11 +1857,11 @@ mod test {
             .create_jit_execution_engine(inkwell::OptimizationLevel::None)
             .unwrap();
         engine.add_global_mapping(
-            &module.get_function("test_array_alloc").unwrap(),
+            &module.get_function("malloc").unwrap(),
             test_array_alloc as *const () as usize,
         );
         engine.add_global_mapping(
-            &module.get_function("test_array_free").unwrap(),
+            &module.get_function("free").unwrap(),
             test_array_free as *const () as usize,
         );
         let run: unsafe extern "C" fn() =
