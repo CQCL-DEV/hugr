@@ -1065,6 +1065,8 @@ pub fn emit_barray_op<'c, H: HugrView<Node = Node>>(
                 result.push(elem_v);
             }
 
+            ccg.emit_free_array(ctx, elems_ptr)?;
+            ccg.emit_free_array(ctx, mask_ptr)?;
             outputs.finish(ctx.builder(), result)
         }
         BArrayOpDef::get => {
@@ -3147,6 +3149,109 @@ mod test {
         } else {
             accounting.invalid_frees += 1;
         }
+    }
+
+    static UNPACK_ALLOCS: Mutex<AllocationAccounting> = Mutex::new(AllocationAccounting {
+        outstanding: Vec::new(),
+        allocated: 0,
+        invalid_frees: 0,
+    });
+
+    unsafe extern "C" fn unpack_alloc(size: usize) -> *mut c_void {
+        let ptr = unsafe { malloc(size) };
+        let mut accounting = UNPACK_ALLOCS.lock().unwrap();
+        accounting.outstanding.push(ptr as usize);
+        accounting.allocated += 1;
+        ptr
+    }
+
+    unsafe extern "C" fn unpack_free(ptr: *mut c_void) {
+        let mut accounting = UNPACK_ALLOCS.lock().unwrap();
+        if let Some(i) = accounting
+            .outstanding
+            .iter()
+            .position(|&p| p == ptr as usize)
+        {
+            accounting.outstanding.swap_remove(i);
+            unsafe { free(ptr) };
+        } else {
+            accounting.invalid_frees += 1;
+        }
+    }
+
+    #[rstest]
+    fn exec_unpack_releases_allocations(mut exec_ctx: TestContext) {
+        use crate::utils::fat::FatExt as _;
+
+        let int_ty = int_type(6);
+        let registry = ExtensionRegistry::new([
+            int_types::EXTENSION.to_owned(),
+            prelude::PRELUDE.to_owned(),
+            borrow_array::EXTENSION.to_owned(),
+            hugr_core::std_extensions::collections::array::EXTENSION.to_owned(),
+            int_ops::EXTENSION.to_owned(),
+        ]);
+        let hugr = SimpleHugrConfig::new()
+            .with_extensions(registry)
+            .with_outs([int_ty.clone()])
+            .finish(|mut b| {
+                let value = b.add_load_value(ConstInt::new_u(6, 7).unwrap());
+                let array = b.add_new_array(int_ty.clone(), [value]).unwrap();
+                let [a] = b
+                    .add_array_unpack(int_ty.clone(), 1, array)
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                let value = b.add_load_value(ConstInt::new_u(6, 11).unwrap());
+                let array = b.add_new_borrow_array(int_ty.clone(), [value]).unwrap();
+                let [bval] = b
+                    .add_borrow_array_unpack(int_ty.clone(), 1, array)
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                let sum = b.add_iadd(6, a, bval).unwrap();
+                b.finish_hugr_with_outputs([sum]).unwrap()
+            });
+        exec_ctx.add_extensions(|cge| {
+            cge.add_default_prelude_extensions()
+                .add_default_borrow_array_extensions(DefaultPreludeCodegen)
+                .add_default_array_extensions()
+                .add_default_int_extensions()
+        });
+        let emission = Emission::emit_hugr(
+            hugr.fat_root().unwrap(),
+            exec_ctx.get_emit_hugr(),
+            TEST_EMIT_DEBUG,
+        )
+        .unwrap();
+        emission.verify().unwrap();
+        let module = emission.module();
+        module
+            .get_function("main")
+            .unwrap()
+            .set_linkage(inkwell::module::Linkage::External);
+        let engine = module
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        engine.add_global_mapping(
+            &module.get_function("malloc").unwrap(),
+            unpack_alloc as *const () as usize,
+        );
+        if let Some(free_fn) = module.get_function("free") {
+            engine.add_global_mapping(&free_fn, unpack_free as *const () as usize);
+        }
+        let run: unsafe extern "C" fn() -> u64 =
+            unsafe { engine.get_function("main").unwrap().into_raw() };
+        for _ in 0..100 {
+            assert_eq!(unsafe { run() }, 18);
+        }
+        let accounting = UNPACK_ALLOCS.lock().unwrap();
+        assert_eq!(accounting.allocated, 300);
+        assert_eq!(accounting.invalid_frees, 0);
+        assert!(
+            accounting.outstanding.is_empty(),
+            "unpacked arrays leaked allocations"
+        );
     }
 
     #[rstest]
